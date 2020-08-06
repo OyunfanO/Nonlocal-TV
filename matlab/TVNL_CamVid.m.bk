@@ -1,0 +1,157 @@
+%imagepath = 'CamVid/Seq05VD_f03690.png';
+imagepaths = ["CamVid/0001TP_008790.png","CamVid/Seq05VD_f00480.png","CamVid/Seq05VD_f04230.png"];
+%imagepath = 'CamVid/0001TP_008790.png'
+%imagepath = 'image/16.png';
+
+global n_clusters nrow ncol
+E = [0.1,0.3,1,3,10];
+lam = 2;
+global e
+iter = 200;
+interval = 0.25*iter;
+for jj = 1:3
+    imagepath = convertStringsToChars(imagepaths(jj));
+    npy = readNPY(strrep(imagepath,'png','npy'));
+    O_k = permute(npy,[2,3,1]);
+
+    II = imread(imagepath);
+    %II = II(1:180,1:240,1:3);
+    %II = II(150:360,1:240,1:3);
+    I = double(II);
+    %O_k = O_k(1:180,1:240,1:11);
+    %O_k = O_k(150:360,1:240,1:11);
+    I = I/max(I(:));
+    gt = imread(strrep(imagepath,'.png','_gt.png'));
+    %gt = gt(1:180,1:240,1:3);
+    %gt = gt(150:360,1:240,1:3);
+
+
+    [nrow, ncol, d] = size(I);
+    [nrow_o,ncol_o,d_o] = size(O_k);
+    n_clusters= d_o;
+
+    tic;
+    W_type = 'CRF10';
+    %W_type = 'wn4';
+    W = image_graph_affinity3(double(I));
+% if strcmp(W_type,'n4')
+%     W_mat = load(strrep(imagepath,'.png','_n4.mat'));
+% elseif strcmp(W_type,'CRF')
+%     W_mat = load(strrep(imagepath,'.png','_k100.mat'));
+% end
+%W = W_mat.W;
+%W = max(W,W');
+    toc;
+%W = sign(W);
+%npy1 = squeeze(npy(1,:,:));
+    O = reshape(O_k,[],n_clusters);
+    for ii=2:4
+        e = E(ii);
+        tau = 0.03*e;
+        A = softmax(O/e,2);
+        tic;
+        alternative_update(O,A,W,lam,tau,iter,imagepath,II,gt,W_type,interval);
+        toc;
+    end
+end
+
+%function [ro, ep, ed] = alternative_update(O,A,W,lam,tau,iter,imagepath,II,gt,W_type,interval)
+function alternative_update(O,A,W,lam,tau,iter,imagepath,II,gt,W_type,interval)    
+
+    global n_clusters nrow ncol e
+    Phi = A; % primal variable
+    % dual variable
+    Q = cell(n_clusters,1);
+    DPhi = cell(n_clusters,1);
+    for jj=1:n_clusters
+         Q{jj} = sparse(nrow*ncol,nrow*ncol);
+    end
+    % auxillary variable
+    div_Q = zeros(size(A));
+    Phi_old = Phi;
+
+    ep = zeros(1,iter);
+    ed = zeros(1,iter);
+    %%%%%%%%%%%%%%%%%%%%%%%%% main loop %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    figure1=figure('Position', [10, 10, nrow*2+10, ncol*2+10]);
+    set(gca,'FontSize',18);
+    
+    for ii=1:iter
+        % update dual variable by gradient acsend
+        for jj=1:n_clusters
+            DPhi{jj} = grad_w(Phi(:,jj),W);
+%             Q{jj} = normalize_row_inf(Q{jj} - tau*DPhi{jj}, lam);
+%             ap = abs(DPhi{jj});
+%             ep(ii) = ep(ii) + lam*sum(ap(:));
+            Q{jj} = normalize_row(Q{jj} - tau*DPhi{jj}, lam);
+            ep(ii) = ep(ii) + lam*sum(sqrt(sum(DPhi{jj}.^2, 2)));
+        end       
+        
+        % update primal variable by gradient descend
+        for jj=1:n_clusters
+            div_Q(:, jj) = div_w(Q{jj},W);
+        end
+        
+       %Phi = softmax((O-lam*div_Q)/e,2);
+       Phi = softmax((O-div_Q)/e,2);
+       
+       AO = -Phi.*O;
+       AlogA = e*Phi.*log(Phi+1e-6);
+       ep(ii) = ep(ii)+sum(AO(:)) + sum(AlogA(:));
+       ed(ii) = sum(AO(:)) + sum(AlogA(:)) + sum(sum(Phi.*div_Q));
+       
+        %Phi = theta*Phi_old + (1-theta)*Phi;
+        Phi_old = Phi;
+       
+        if mod(ii,interval)==0
+            rA = reshape(A,nrow,ncol,n_clusters);
+            ro = reshape(Phi,nrow,ncol,n_clusters);
+            visA = visualP(rA);
+            viso = visualP(ro);
+
+            %figure;
+            subplot(2,2,1);
+            imshow(II);
+            title('original image');
+            axis tight;
+
+            subplot(2,2,2);
+            imshow(gt);
+            title('gt');
+            axis tight;
+
+            % figure;
+            subplot(2,2,3);
+            imshow(visA);
+            title('Binarized softmax(O)');
+            axis tight;
+
+            % figure;
+            subplot(2,2,4);
+            imshow(viso);
+            %str = sprintf('tau=%.3f,e=%.2f,lam=%.2f,W:%s,norm2', tau,e,lam,W_type);
+            str = sprintf('tau=%.3f,e=%.2f,lam=%.2f,W-%s,iter=%d', tau,e,lam,W_type,ii);
+            title(str);
+            axis tight;
+
+            s = split(imagepath,'.');
+            filename = strcat(s{1},'_',str,'.',s{2});
+            saveas(gcf,filename);
+        end
+    end
+    figure;
+    plot(ep(10:iter),'LineWidth', 2);
+    axis tight;
+    hold on; 
+
+    %figure;
+    plot(ed(10:iter),'r--','LineWidth', 2);
+    title('primal-dual energy');
+    %title('dual energy');
+    legend('primal energy','dual energy');
+    filename = strcat(s{1},'_',str,'_pd.',s{2});
+    saveas(gcf,filename);
+    ro = Phi;
+end
+
+
